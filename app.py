@@ -166,5 +166,8 @@ iface = gr.Interface(
 )
 
 if __name__ == "__main__":
-    iface.launch(server_name="0.0.0.0", server_port=7860, share=True)
+    launch_info = iface.launch(server_name="0.0.0.0", server_port=7860, share=True)
+    if hasattr(launch_info, 'share_url') and launch_info.share_url:
+        print(f"\n🚀 Public URL: {launch_info.share_url}\n")
+
 
