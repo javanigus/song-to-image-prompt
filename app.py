@@ -5,9 +5,6 @@ import re
 import whisper
 import torch
 
-openai.api_key = "YOUR_OPENAI_KEY"  # Add your API key here or via Hugging Face Secrets
-
-
 # ---------- Helper Functions ----------
 
 # Load model once when app starts
@@ -84,22 +81,39 @@ def instrumental_prompt(song_theme, era="1950s"):
     )
 
 
-def detect_song_theme(full_lyrics):
-    """
-    Estimate the overall theme of the entire song.
-    """
-    prompt = f"""
-    Analyze the overall emotional or narrative theme of this song in 3-5 words:
-    ---
-    {full_lyrics[:2000]}
-    """
-    response = openai.ChatCompletion.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "system", "content": "You analyze songs and lyrics."},
-                  {"role": "user", "content": prompt}]
-    )
-    return response["choices"][0]["message"]["content"].strip()
+from openai import OpenAI
+client = OpenAI()  # Uses your OPENAI_API_KEY from environment
 
+def detect_song_theme(lyrics_text: str) -> str:
+    """
+    Detects the song's overall theme using GPT (modern API syntax).
+    """
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",  # or "gpt-3.5-turbo" if you prefer
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a helpful music analysis assistant. "
+                        "Read the song lyrics and describe the main emotional or narrative theme in one concise sentence. "
+                        "Examples: 'romantic longing', 'nostalgic heartbreak', 'carefree summer love'."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": lyrics_text
+                }
+            ],
+            temperature=0.7
+        )
+        theme = response.choices[0].message.content.strip()
+        print(f"🎵 Detected theme: {theme}")
+        return theme
+
+    except Exception as e:
+        print(f"⚠️ Error detecting song theme: {e}")
+        return "unknown"
 
 # ---------- Main Pipeline ----------
 
