@@ -60,8 +60,7 @@ def analyze_theme(verse_text):
         messages=[{"role": "system", "content": "You analyze song lyrics."},
                   {"role": "user", "content": prompt}]
     )
-    return response["choices"][0]["message"]["content"].strip()
-
+    return response.choices[0].message.content.strip()
 
 def verse_prompt(verse_theme, gender="female", era="1950s"):
     """
