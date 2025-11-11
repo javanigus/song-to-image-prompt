@@ -3,16 +3,22 @@ import openai
 import json
 import re
 import whisper
+import torch
 
 openai.api_key = "YOUR_OPENAI_KEY"  # Add your API key here or via Hugging Face Secrets
 
 
 # ---------- Helper Functions ----------
 
+# Load model once when app starts
+print("🔄 Loading Whisper model...")
+model = whisper.load_model("small", device="cuda" if torch.cuda.is_available() else "cpu")
+print("✅ Whisper model loaded!")
+
 def transcribe_audio(audio_path):
-    model = whisper.load_model("small")
-    result = model.transcribe(audio_path, word_timestamps=True)
+    result = model.transcribe(audio_path)
     return result
+
 
 
 def group_verses(segments, pause_threshold=2.5):
