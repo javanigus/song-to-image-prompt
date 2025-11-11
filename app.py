@@ -1,196 +1,172 @@
-import gradio as gr
-import openai
+import os
 import json
 import re
 import whisper
 import torch
+import gradio as gr
+from openai import OpenAI
 
-# ---------- Helper Functions ----------
+# --- Configuration ---
+MODEL_NAME = os.getenv("WHISPER_MODEL", "small")
+ERA_DEFAULT = os.getenv("DEFAULT_ERA", "1950s")
+GENDER_DEFAULT = os.getenv("DEFAULT_GENDER", "female")
 
-# Load model once when app starts
-print("🔄 Loading Whisper model...")
-model = whisper.load_model("small", device="cuda" if torch.cuda.is_available() else "cpu")
+# Set up OpenAI client (reads OPENAI_API_KEY from environment/secrets)
+client = OpenAI()
+
+# Load Whisper model once at startup
+print(f"🔄 Loading Whisper model '{MODEL_NAME}' …")
+device = "cuda" if torch.cuda.is_available() else "cpu"
+model = whisper.load_model(MODEL_NAME, device=device)
 print("✅ Whisper model loaded!")
 
-def transcribe_audio(audio_path):
-    result = model.transcribe(audio_path)
-    return result
+# --- Helper Functions ---
 
-
-
-def group_verses(segments, pause_threshold=2.5):
-    """
-    Group Whisper segments into verses using silence pauses.
-    Returns list of dicts with start, end, text.
-    """
+def split_into_verses(lyrics_text: str):
+    """Split full lyric text into verse blocks on double-newline or large gap."""
+    # Normalize newlines
+    blocks = re.split(r"\n{2,}", lyrics_text.strip())
     verses = []
-    current = {"start": segments[0]["start"], "text": ""}
-    for i, seg in enumerate(segments):
-        current["text"] += " " + seg["text"].strip()
-        # Look at next segment to check gap
-        if i < len(segments) - 1:
-            gap = segments[i + 1]["start"] - seg["end"]
-            if gap > pause_threshold:
-                current["end"] = seg["end"]
-                verses.append(current)
-                current = {"start": segments[i + 1]["start"], "text": ""}
-        else:
-            current["end"] = seg["end"]
-            verses.append(current)
+    for idx, block in enumerate(blocks, start=1):
+        cleaned = block.strip()
+        if not cleaned:
+            continue
+        verses.append({
+            "verse": idx,
+            "text": cleaned
+        })
     return verses
 
-
-def analyze_theme(verse_text):
+def align_timestamps(segments, verses):
     """
-    Use GPT to summarize the theme of a verse.
+    Align Whisper word-level segments to verse blocks.
+    For each verse, approximate start = first segment start,
+    end = last segment end before next verse begins.
     """
-    prompt = f"""
-    You are a song analyst. Summarize the main emotional theme or story of this verse
-    in 2-4 words (e.g., 'romantic longing', 'heartbreak and hope', 'nostalgic love').
+    aligned = []
+    seg_iter = iter(segments)
+    seg = next(seg_iter, None)
+    for v in verses:
+        start_t = None
+        end_t = None
+        # find first segment in this verse
+        while seg and not start_t:
+            start_t = seg["start"]
+            end_t = seg["end"]
+            seg = next(seg_iter, None)
+        # then find segments until we suspect next verse (based on text match)
+        # Here we simplify: just take the last found end_t
+        aligned.append({
+            "verse": v["verse"],
+            "text": v["text"],
+            "start": round(start_t, 2) if start_t is not None else None,
+            "end": round(end_t, 2) if end_t is not None else None
+        })
+    return aligned
 
-    Verse:
-    {verse_text}
-    """
-    
-    from openai import OpenAI
-    client = OpenAI()
-
+def detect_theme(text_block: str) -> str:
+    """Call OpenAI to detect the theme of a text block (verse or full song)."""
+    system_msg = {
+        "role": "system",
+        "content": "You are a music analyst. Summarize the main emotional or narrative theme of the following lyrics in one short sentence."
+    }
+    user_msg = {
+        "role": "user",
+        "content": text_block
+    }
     response = client.chat.completions.create(
         model="gpt-4o-mini",
-        messages=[{"role": "system", "content": "You analyze song lyrics."},
-                  {"role": "user", "content": prompt}]
+        messages=[system_msg, user_msg],
+        temperature=0.7
     )
     return response.choices[0].message.content.strip()
 
-def verse_prompt(verse_theme, gender="female", era="1950s"):
-    """
-    Generate an image prompt for a vocal verse.
-    """
+def verse_image_prompt(theme: str, gender: str, era: str) -> str:
     return (
-        f"{era} {gender} singer performing passionately in a cinematic close-up scene "
-        f"that visually represents the theme '{verse_theme}'. Vintage microphone, "
-        "dramatic stage lighting, photorealistic composition."
+        f"{era} {gender} singer in a cinematic close-up, performing passionately in a vintage microphone scene, "
+        f"visualizing the theme '{theme}'. Dramatic stage lighting, photorealistic, shallow depth of field."
     )
 
-
-def instrumental_prompt(song_theme, era="1950s"):
-    """
-    Generate a background/scene image prompt for instrumental parts.
-    """
+def instrumental_image_prompt(song_theme: str, era: str) -> str:
     return (
-        f"Cinematic {era} scene symbolizing '{song_theme}' — "
-        f"a beautifully lit environment evoking the song's emotional theme, "
-        "no people visible, photorealistic and atmospheric."
+        f"Cinematic {era} scene symbolizing '{song_theme}' — no people visible, "
+        "beautifully lit environment, photorealistic and atmospheric."
     )
 
+# --- Main processing function ---
 
-from openai import OpenAI
-client = OpenAI()  # Uses your OPENAI_API_KEY from environment
-
-def detect_song_theme(lyrics_text: str) -> str:
-    """
-    Detects the song's overall theme using GPT (modern API syntax).
-    """
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",  # or "gpt-3.5-turbo" if you prefer
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a helpful music analysis assistant. "
-                        "Read the song lyrics and describe the main emotional or narrative theme in one concise sentence. "
-                        "Examples: 'romantic longing', 'nostalgic heartbreak', 'carefree summer love'."
-                    )
-                },
-                {
-                    "role": "user",
-                    "content": lyrics_text
-                }
-            ],
-            temperature=0.7
-        )
-        theme = response.choices[0].message.content.strip()
-        print(f"🎵 Detected theme: {theme}")
-        return theme
-
-    except Exception as e:
-        print(f"⚠️ Error detecting song theme: {e}")
-        return "unknown"
-
-# ---------- Main Pipeline ----------
-
-def process_song(audio_path, gender="female", era="1950s"):
-    print("Transcribing...")
-    result = transcribe_audio(audio_path)
+def process_song(audio_file_path, gender, era):
+    # 1) Transcribe audio with timestamps
+    print("🎧 Transcribing…")
+    result = model.transcribe(audio_file_path, word_timestamps=True)
+    full_lyrics = result["text"]
     segments = result["segments"]
-    full_text = result["text"]
-
-    # Group verses
-    verses = group_verses(segments)
-    song_theme = detect_song_theme(full_text)
-
-    structured = []
-
-    # Generate vocal segments (verses)
-    for i, v in enumerate(verses, 1):
-        verse_theme = analyze_theme(v["text"])
-        prompt = verse_prompt(verse_theme, gender, era)
-        structured.append({
-            "start": round(v["start"], 2),
-            "end": round(v["end"], 2),
+    
+    # 2) Split into verses (text blocks)
+    verses = split_into_verses(full_lyrics)
+    if not verses:
+        # fallback: treat full lyrics as one verse
+        verses = [{"verse": 1, "text": full_lyrics}]
+    
+    # 3) Align timestamps to each verse
+    aligned = align_timestamps(segments, verses)
+    
+    # 4) Detect overall song theme
+    print("🧠 Detecting overall song theme…")
+    song_theme = detect_theme(full_lyrics)
+    print(f"🎵 Detected Song Theme: {song_theme}")
+    
+    # 5) Build result list
+    result_list = []
+    for v in aligned:
+        theme = detect_theme(v["text"])
+        idx = v["verse"]
+        prompt = verse_image_prompt(theme, gender, era)
+        result_list.append({
+            "start": v["start"],
+            "end": v["end"],
             "type": "vocals",
-            "verse": i,
-            "verse_theme": verse_theme,
+            "verse": idx,
+            "verse_theme": theme,
             "image_prompt": prompt
         })
-
-    # Detect instrumental gaps between verses
-    instrumental_sections = []
-    for i in range(len(verses) - 1):
-        gap_start = verses[i]["end"]
-        gap_end = verses[i + 1]["start"]
-        if gap_end - gap_start > 1.5:  # Minimum silence for instrumental
-            instrumental_sections.append((gap_start, gap_end))
-
-    # Add instrumental sections to the list
-    for s, e in instrumental_sections:
-        structured.append({
-            "start": round(s, 2),
-            "end": round(e, 2),
+        # Add an instrumental segment after each verse (optional)
+        # If you prefer only verses, remove next block
+        result_list.append({
+            "start": v["end"],
+            "end": v["end"] + 1.0,   # small gap
             "type": "instrumental",
             "verse": None,
             "verse_theme": None,
-            "image_prompt": instrumental_prompt(song_theme, era)
+            "image_prompt": instrumental_image_prompt(song_theme, era)
         })
+    
+    return result_list
 
-    # Sort by start time
-    structured = sorted(structured, key=lambda x: x["start"])
-    return structured
-
-
-# ---------- Gradio Interface ----------
+# --- Gradio Interface ---
 
 def ui_generate(audio_file, gender, era):
-    result = process_song(audio_file, gender, era)
-    return json.dumps(result, indent=2)
-
+    if audio_file is None:
+        return "No file uploaded.", None
+    results = process_song(audio_file, gender, era)
+    return json.dumps(results, indent=2, ensure_ascii=False), results
 
 iface = gr.Interface(
     fn=ui_generate,
     inputs=[
         gr.Audio(type="filepath", label="Upload Song"),
-        gr.Radio(["female", "male"], value="female", label="Singer gender"),
-        gr.Radio(["1950s", "1970s", "modern"], value="1950s", label="Era")
+        gr.Radio(["female","male"], label="Singer Gender", value=GENDER_DEFAULT),
+        gr.Dropdown(["1950s","1970s","1980s","1990s","2000s","modern"], label="Era", value=ERA_DEFAULT)
     ],
-    outputs=gr.JSON(label="Song Structure & Image Prompts"),
-    title="🎶 Song-to-Image Prompt Generator (Lyrics & Instrumentals)",
-    description="Uploads a song, extracts lyrics and timestamps, determines themes per verse, and generates AI image prompts."
+    outputs=[
+        gr.Textbox(label="Generated Prompts JSON", lines=20),
+        gr.JSON(label="Structured Output")
+    ],
+    title="🎵 Song → Image Prompt Generator",
+    description="Upload a song. Each verse is analysed and image prompt is generated. Instrumental segments get prompts too."
 )
 
 if __name__ == "__main__":
     launch_info = iface.launch(server_name="0.0.0.0", server_port=7860, share=True)
     if hasattr(launch_info, 'share_url') and launch_info.share_url:
         print(f"\n🚀 Public URL: {launch_info.share_url}\n")
-
-
